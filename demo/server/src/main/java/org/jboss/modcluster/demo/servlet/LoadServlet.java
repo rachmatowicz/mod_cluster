@@ -46,10 +46,11 @@ import org.apache.catalina.connector.Connector;
 
 /**
  * @author Paul Ferraro
- * 
  */
 public class LoadServlet extends HttpServlet {
-    /** The serialVersionUID */
+    /**
+     * The serialVersionUID
+     */
     private static final long serialVersionUID = 5665079393261425098L;
 
     protected static final String DURATION = "duration";
@@ -59,24 +60,31 @@ public class LoadServlet extends HttpServlet {
     private static final String HOST = "host";
     private static final String PORT = "port";
 
+    // access port and jvmRoute via Server MBean
     private static final String SERVER_OBJECT_NAME = "server-object-name";
     private static final String SERVICE_NAME = "service-name";
     private static final String DEFAULT_SERVER_OBJECT_NAME = "jboss.web:type=Server";
     private static final String DEFAULT_SERVICE_NAME = "jboss.web";
+
+    // access port and jvmRoute via Service MBean
     private static final String SERVICE_OBJECT_NAME = "service-object-name";
     private static final String DEFAULT_SERVICE_OBJECT_NAME = "jboss.web:type=Service,serviceName=jboss.web";
-
     private static final String ENGINE_OBJECT_NAME = "engine-object-name";
-
     private static final String DEFAULT_ENGINE_OBJECT_NAME = "jboss.web:type=Engine";
 
+    // access port and jvmRoute via Engine and Connector MBeans
     private static final String TOMCAT_ENGINE_OBJECT_NAME = "Catalina:type=Engine";
-
     private static final String CONNECTOR_OBJECT_NAME = "connector-object-name";
-
     private static final String TOMCAT_CONNECTOR_OBJECT_NAME = "Catalina:type=Connector,port=*";
 
-     private String jvmRoute;
+    // access port and jvmRoute via JBoss Web subsystem MBeans (AS7)
+    private static final String SUBSYSTEM_OBJECT_NAME = "subsystem-name";
+    private static final String AS7_SUBSYSTEM_OBJECT_NAME = "jboss.as:subsystem=web";
+    private static final String AS7_CONNECTOR_OBJECT_NAME = "jboss.as:subsystem=web,connector=http";
+    private static final String SOCKET_BINDING_OBJECT_NAME = "socket-binding-name";
+    private static final String AS7_SOCKET_BINDING_OBJECT_NAME = "jboss.as:socket-binding-group=standard-sockets";
+
+    private String jvmRoute;
 
     /**
      * @{inheritDoc
@@ -88,50 +96,69 @@ public class LoadServlet extends HttpServlet {
 
         try {
             MBeanServer server = ManagementFactory.getPlatformMBeanServer();
-            ObjectName name = ObjectName.getInstance(this.getInitParameter(SERVER_OBJECT_NAME, DEFAULT_SERVER_OBJECT_NAME));
+            ObjectName name = ObjectName.getInstance(this.getInitParameter(SUBSYSTEM_OBJECT_NAME, AS7_SUBSYSTEM_OBJECT_NAME));
             if (server.isRegistered(name)) {
-                /* jbossweb 5.0 and 6.0 */
-                String serviceName = this.getInitParameter(SERVICE_NAME, DEFAULT_SERVICE_NAME);
-                Service service = (Service) server.invoke(name, "findService", new Object[] { serviceName }, new String[] { String.class.getName() });
+                /* AS7 subsystem MBeans available */
+                /* get the HTTP Connector port by (i) finding the HTTP Connector,(ii) looking up the associated socket binding and
+                (iii) finding the actual port (boundPort) mapped to that socket binding */
+                name = ObjectName.getInstance(this.getInitParameter(CONNECTOR_OBJECT_NAME, AS7_CONNECTOR_OBJECT_NAME));
+                String socketBindingName = (String) server.getAttribute(name, "socketBinding");
+                name = ObjectName.getInstance(this.getInitParameter(SOCKET_BINDING_OBJECT_NAME, AS7_SOCKET_BINDING_OBJECT_NAME)+
+                        ",socket-binding="+socketBindingName);
+                Integer connectorPort = (Integer) server.getAttribute(name, "boundPort");
 
-                for (Connector connector : service.findConnectors()) {
-                    if (connector.getProtocol().startsWith("HTTP")) {
-                        ServletContext context = config.getServletContext();
-                        context.setAttribute(PORT, Integer.valueOf(connector.getPort()));
-                    }
-                }
-                this.jvmRoute = ((Engine) service.getContainer()).getJvmRoute();
-                return;
+                ServletContext context = config.getServletContext();
+                context.setAttribute(PORT, connectorPort.intValue());
+
+                /* get the jvmRoute by getting the instanceId from the subsystem */
+                name = ObjectName.getInstance(this.getInitParameter(SUBSYSTEM_OBJECT_NAME, AS7_SUBSYSTEM_OBJECT_NAME));
+                this.jvmRoute = (String) server.getAttribute(name, "instanceId");
+                return ;
             } else {
-                name = ObjectName.getInstance(this.getInitParameter(SERVICE_OBJECT_NAME, DEFAULT_SERVICE_OBJECT_NAME));
+                name = ObjectName.getInstance(this.getInitParameter(SERVER_OBJECT_NAME, DEFAULT_SERVER_OBJECT_NAME));
                 if (server.isRegistered(name)) {
-                    /* AS7 Void.class.getName() */
-                    for (Connector connector : (Connector []) server.invoke(name, "findConnectors", new Object[] { },
-                            new String[] { })) {
+                    /* jbossweb 5.0 and 6.0 */
+                    String serviceName = this.getInitParameter(SERVICE_NAME, DEFAULT_SERVICE_NAME);
+                    Service service = (Service) server.invoke(name, "findService", new Object[]{serviceName}, new String[]{String.class.getName()});
+
+                    for (Connector connector : service.findConnectors()) {
                         if (connector.getProtocol().startsWith("HTTP")) {
                             ServletContext context = config.getServletContext();
                             context.setAttribute(PORT, Integer.valueOf(connector.getPort()));
                         }
                     }
-                    name = ObjectName.getInstance(this.getInitParameter(ENGINE_OBJECT_NAME, DEFAULT_ENGINE_OBJECT_NAME));
-                    this.jvmRoute = (String) server.getAttribute(name, "jvmRoute");
+                    this.jvmRoute = ((Engine) service.getContainer()).getJvmRoute();
                     return;
-                    
                 } else {
-                    /* must be Tomcat6 */
-                    name = ObjectName.getInstance(this.getInitParameter(CONNECTOR_OBJECT_NAME, TOMCAT_CONNECTOR_OBJECT_NAME));
-                    for (ObjectName connectorname: server.queryNames(name, null)) {
-                        if (((String) server.getAttribute(connectorname, "protocol")).startsWith("HTTP")) {
-                            ServletContext context = config.getServletContext();
-                            context.setAttribute(PORT, Integer.valueOf(server.getAttribute(connectorname, "port").toString()));
-                         }
+                    name = ObjectName.getInstance(this.getInitParameter(SERVICE_OBJECT_NAME, DEFAULT_SERVICE_OBJECT_NAME));
+                    if (server.isRegistered(name)) {
+                        /* AS7 Void.class.getName() */
+                        for (Connector connector : (Connector[]) server.invoke(name, "findConnectors", new Object[]{},
+                                new String[]{})) {
+                            if (connector.getProtocol().startsWith("HTTP")) {
+                                ServletContext context = config.getServletContext();
+                                context.setAttribute(PORT, Integer.valueOf(connector.getPort()));
+                            }
+                        }
+                        name = ObjectName.getInstance(this.getInitParameter(ENGINE_OBJECT_NAME, DEFAULT_ENGINE_OBJECT_NAME));
+                        this.jvmRoute = (String) server.getAttribute(name, "jvmRoute");
+                        return;
+
+                    } else {
+                        /* must be Tomcat6 */
+                        name = ObjectName.getInstance(this.getInitParameter(CONNECTOR_OBJECT_NAME, TOMCAT_CONNECTOR_OBJECT_NAME));
+                        for (ObjectName connectorname : server.queryNames(name, null)) {
+                            if (((String) server.getAttribute(connectorname, "protocol")).startsWith("HTTP")) {
+                                ServletContext context = config.getServletContext();
+                                context.setAttribute(PORT, Integer.valueOf(server.getAttribute(connectorname, "port").toString()));
+                            }
+                        }
+                        name = ObjectName.getInstance(this.getInitParameter(ENGINE_OBJECT_NAME, TOMCAT_ENGINE_OBJECT_NAME));
+                        this.jvmRoute = (String) server.getAttribute(name, "jvmRoute");
+                        return;
                     }
-                    name = ObjectName.getInstance(this.getInitParameter(ENGINE_OBJECT_NAME, TOMCAT_ENGINE_OBJECT_NAME));
-                    this.jvmRoute = (String) server.getAttribute(name, "jvmRoute");
-                    return;
                 }
             }
-            
         } catch (MalformedObjectNameException e) {
             throw new ServletException(e);
         } catch (NullPointerException e) {
@@ -152,6 +179,8 @@ public class LoadServlet extends HttpServlet {
     }
 
     protected String createServerURL(HttpServletRequest request, Map<String, String> parameterMap) {
+
+        this.log("Creating server request: server name: " + request.getServerName() + ", serverPort: " + request.getServerPort());
         return this.createURL(request, request.getServerName(), request.getServerPort(), parameterMap);
     }
 
@@ -164,6 +193,7 @@ public class LoadServlet extends HttpServlet {
         Integer contextPort = (Integer) context.getAttribute(PORT);
         int port = (contextPort != null) ? contextPort.intValue() : request.getLocalPort();
 
+        this.log("Creating local request: local name: " + host + ", local port: " + port);
         return this.createURL(request, host, port, parameterMap);
     }
 
